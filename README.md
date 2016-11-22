@@ -1,2 +1,2 @@
 # mpi-implementations
-Seachs in mpi library.
+Operations with matrices using the mpi library.
