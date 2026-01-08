@@ -2,11 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Neste codigo foi utilizado uma matriz com alocação dinâmica, no qual I será o
-numero de linhas(entrado pelo usuário) e J o numero de colunas(entrado pelo
-usuario). Dependendo da escolha do numero de processos ele dividirá as linhas da
-matriz igualmente dentro desses processos. Sendo o numero de processos(size) um
-multiplo de I e J. */
+/* This code uses a dynamically allocated matrix, where I is the number of rows
+entered by the user and J is the number of columns entered by the user.
+Depending on the number of processes, it divides the matrix rows evenly among
+them. The number of processes (size) must be a multiple of I and J. */
 
 int main(int argc, char **argv) {
 
@@ -22,9 +21,9 @@ int main(int argc, char **argv) {
   P = size;
 
   if (rank == 0) {
-    printf("Insira o tamanho desejado para as linhas da Matriz:\n");
+    printf("Enter the desired number of matrix rows:\n");
     scanf("%d", &I);
-    printf("Insira o tamanho desejado para as colunas da Matriz:\n");
+    printf("Enter the desired number of matrix columns:\n");
     scanf("%d", &J);
     for (i = 1; i < size; i++) {
       MPI_Send(&I, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
@@ -48,7 +47,7 @@ int main(int argc, char **argv) {
       value[i] = (float *)malloc((J) * sizeof(float));
 
     if (rank == 0) {
-      printf("Insira os passos de tempo:\n");
+      printf("Enter the time steps:\n");
       scanf("%d", &T);
       for (i = 1; i < size; i++)
         MPI_Send(&T, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
@@ -81,7 +80,7 @@ int main(int argc, char **argv) {
                            5);
           value[0][J - 1] =
               ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
@@ -111,7 +110,7 @@ int main(int argc, char **argv) {
         if ((M > 1) && (J <= 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[1][0]) / 3);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
@@ -123,7 +122,7 @@ int main(int argc, char **argv) {
         if ((M <= 1) && (J > 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[0][1]) / 3);
-          // entre 0 e J-1
+          // between 0 and J-1
           for (j = 1; j < J - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
@@ -155,7 +154,7 @@ int main(int argc, char **argv) {
                            5);
           value[0][J - 1] =
               ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
@@ -185,7 +184,7 @@ int main(int argc, char **argv) {
         if ((M > 1) && (J <= 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[1][0] + v_previous) / 4);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
@@ -197,7 +196,7 @@ int main(int argc, char **argv) {
         if ((M <= 1) && (J > 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[0][1] + v_previous) / 4);
-          // entre 0 e J-1
+          // between 0 and J-1
           for (j = 1; j < J - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
@@ -227,7 +226,7 @@ int main(int argc, char **argv) {
                            5);
           value[0][J - 1] =
               ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
@@ -257,7 +256,7 @@ int main(int argc, char **argv) {
         if ((M > 1) && (J <= 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[1][0] + v_previous) / 4);
-          // entre 0 e M-1
+          // between 0 and M-1
           for (i = 1; i < M - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
@@ -268,7 +267,7 @@ int main(int argc, char **argv) {
         if ((M <= 1) && (J > 1)) {
           // 0
           value[0][0] = ((2 * value[0][0] + value[0][1] + v_previous) / 4);
-          // entre 0 e J-1
+          // between 0 and J-1
           for (j = 1; j < J - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
@@ -284,7 +283,7 @@ int main(int argc, char **argv) {
 
     for (i = 0; i < M; i++) {
       for (j = 0; j < J; j++)
-        printf("O resultado para o rank %d e posicao i:%d j: %d foi %f\n", rank,
+        printf("Result for rank %d at position i:%d j:%d was %f\n", rank,
                i, j, value[i][j]);
     }
     MPI_Finalize();
@@ -292,7 +291,7 @@ int main(int argc, char **argv) {
 
   else {
     if (rank == 0)
-      printf("Os numero de processos nao sao multiplos do tamanho da Matriz\n");
+      printf("The number of processes is not a multiple of the matrix size\n");
     MPI_Finalize();
   }
   return 0;
