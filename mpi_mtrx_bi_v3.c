@@ -2,17 +2,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define pos(i, j, N) ((i * N) + j)
+#define pos(i, j, elementsPerRank) ((i * elementsPerRank) + j)
 
-/* This code uses a dynamically allocated matrix, where I is the number of rows
-entered by the user and J is the number of columns entered by the user.
-Depending on the number of processes, it divides the matrix rows evenly among
-them. The number of processes (size) must be a multiple of I and J. */
+/* This code uses a dynamically allocated matrix, where rows and columns are
+entered by the user. Depending on the number of processes, it divides the
+matrix rows evenly among them. The number of processes (size) must be a
+multiple of the row count and column count. */
 
 int main(int argc, char **argv) {
 
-  int rank, size, i, j, I, J, P, N, M, t, T, cont = 0;
-  float **value, v_next, v_previous;
+  int rank, size, i, j, rows, cols, elementsPerRank, localRows, step, steps,
+      counter = 0;
+  float **value, valueNext, valuePrev;
 
   MPI_Status status;
 
@@ -20,273 +21,301 @@ int main(int argc, char **argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  P = size;
-
   if (rank == 0) {
     printf("Enter the desired number of matrix rows:\n");
-    scanf("%d", &I);
+    scanf("%d", &rows);
     printf("Enter the desired number of matrix columns:\n");
-    scanf("%d", &J);
+    scanf("%d", &cols);
     for (i = 1; i < size; i++) {
-      MPI_Send(&I, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
-      MPI_Send(&J, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+      MPI_Send(&rows, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+      MPI_Send(&cols, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
     }
   }
 
   else {
-    MPI_Recv(&I, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-    MPI_Recv(&J, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+    MPI_Recv(&rows, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+    MPI_Recv(&cols, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
   }
 
-  if (I % P == 0) {
+  if (size == 1) {
+    if (rank == 0)
+      printf("This program requires at least 2 MPI processes.\n");
+    MPI_Finalize();
+    return 0;
+  }
 
-    M = I / P;
-    N = (I * J) / P;
+  if (rows % size == 0) {
 
-    value = (float **)malloc((M) * sizeof(float *));
+    localRows = rows / size;
+    elementsPerRank = (rows * cols) / size;
 
-    for (i = 0; i < M; i++)
-      value[i] = (float *)malloc((J) * sizeof(float));
+    value = (float **)malloc((localRows) * sizeof(float *));
+
+    for (i = 0; i < localRows; i++)
+      value[i] = (float *)malloc((cols) * sizeof(float));
 
     if (rank == 0) {
       printf("Enter the time steps:\n");
-      scanf("%d", &T);
+      scanf("%d", &steps);
       for (i = 1; i < size; i++)
-        MPI_Send(&T, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+        MPI_Send(&steps, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
     }
 
     else
-      MPI_Recv(&T, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+      MPI_Recv(&steps, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
 
-    for (i = 0; i < M; i++) {
-      for (j = 0; j < J; j++) {
-        value[i][j] = (N * rank + cont);
-        cont++;
+    for (i = 0; i < localRows; i++) {
+      for (j = 0; j < cols; j++) {
+        value[i][j] = (elementsPerRank * rank + counter);
+        counter++;
       }
     }
 
-    for (t = 1; t <= T; t++) {
+    for (step = 1; step <= steps; step++) {
 
       if (rank == 0) {
 
-        MPI_Send(&value[M - 1][J - 1], 1, MPI_FLOAT, (rank + 1), 1,
+        MPI_Send(&value[localRows - 1][cols - 1], 1, MPI_FLOAT, (rank + 1), 1,
                  MPI_COMM_WORLD);
-        MPI_Recv(&v_next, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD, &status);
+        MPI_Recv(&valueNext, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD,
+                 &status);
 
-        if ((M > 1) && (J > 1)) {
-          // 0
+        if ((localRows > 1) && (cols > 1)) {
+          // corner at i=0, j=0 (top/left)
           value[0][0] = ((2 * value[0][0] + value[0][1] + value[1][0]) / 4);
-          for (j = 1; j < J - 1; j++)
+          for (j = 1; j < cols - 1; j++)
             value[0][j] = ((value[0][j - 1] + 2 * value[0][j] +
                             value[0][j + 1] + value[1][j]) /
                            5);
-          value[0][J - 1] =
-              ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
+          value[0][cols - 1] = ((value[0][cols - 2] + 2 * value[0][cols - 1] +
+                                 value[1][cols - 1]) /
+                                4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
                            5);
-            for (j = 1; j < J - 1; j++)
+            for (j = 1; j < cols - 1; j++)
               value[i][j] =
                   ((value[i][j - 1] + 2 * value[i][j] + value[i][j + 1] +
                     value[i + 1][j] + value[i - 1][j]) /
                    6);
-            value[i][J - 1] = ((value[i][J - 2] + 2 * value[i][J - 1] +
-                                value[i + 1][J - 1] + value[i - 1][J - 1]) /
-                               5);
+            value[i][cols - 1] =
+                ((value[i][cols - 2] + 2 * value[i][cols - 1] +
+                  value[i + 1][cols - 1] + value[i - 1][cols - 1]) /
+                 5);
           }
-          // M-1
-          value[M - 1][0] =
-              ((2 * value[M - 1][0] + value[M - 1][1] + value[M - 2][0]) / 4);
-          for (j = 1; j < J - 1; j++)
-            value[M - 1][j] = ((value[M - 1][j - 1] + 2 * value[M - 1][j] +
-                                value[M - 1][j + 1] + value[M - 2][j]) /
-                               5);
-          value[M - 1][J - 1] =
-              ((value[M - 1][J - 2] + 2 * value[M - 1][J - 1] +
-                value[M - 2][J - 1] + v_next) /
+          // last row (localRows - 1)
+          value[localRows - 1][0] =
+              ((2 * value[localRows - 1][0] + value[localRows - 1][1] +
+                value[localRows - 2][0]) /
+               4);
+          for (j = 1; j < cols - 1; j++)
+            value[localRows - 1][j] =
+                ((value[localRows - 1][j - 1] + 2 * value[localRows - 1][j] +
+                  value[localRows - 1][j + 1] + value[localRows - 2][j]) /
+                 5);
+          value[localRows - 1][cols - 1] =
+              ((value[localRows - 1][cols - 2] +
+                2 * value[localRows - 1][cols - 1] +
+                value[localRows - 2][cols - 1] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J <= 1)) {
-          // 0
+        if ((localRows > 1) && (cols <= 1)) {
+          // corner at i=0, j=0 (top/left)
           value[0][0] = ((2 * value[0][0] + value[1][0]) / 3);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
-          // M-1
-          value[M - 1][0] =
-              ((value[M - 2][0] + 2 * value[M - 1][0] + v_next) / 4);
+          // last row (localRows - 1)
+          value[localRows - 1][0] = ((value[localRows - 2][0] +
+                                      2 * value[localRows - 1][0] + valueNext) /
+                                     4);
         }
 
-        if ((M <= 1) && (J > 1)) {
-          // 0
+        if ((localRows <= 1) && (cols > 1)) {
+          // corner at i=0, j=0 (top/left)
           value[0][0] = ((2 * value[0][0] + value[0][1]) / 3);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
-          // J-1
-          value[0][J - 1] =
-              ((value[0][J - 2] + 2 * value[0][J - 1] + v_next) / 4);
+          // last column (cols - 1)
+          value[0][cols - 1] =
+              ((value[0][cols - 2] + 2 * value[0][cols - 1] + valueNext) / 4);
         }
 
-        if ((M <= 1) && (J <= 1)) {
-          value[0][0] = ((2 * value[0][0] + value[0][1] + v_next) / 4);
+        if ((localRows <= 1) && (cols <= 1)) {
+          value[0][0] = ((2 * value[0][0] + valueNext) / 3);
         }
       }
 
       if ((rank > 0) && (rank < (size - 1))) {
         MPI_Send(&value[0][0], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
-        MPI_Send(&value[M - 1][J - 1], 1, MPI_FLOAT, (rank + 1), 1,
+        MPI_Send(&value[localRows - 1][cols - 1], 1, MPI_FLOAT, (rank + 1), 1,
                  MPI_COMM_WORLD);
-        MPI_Recv(&v_previous, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
+        MPI_Recv(&valuePrev, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
                  &status);
-        MPI_Recv(&v_next, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD, &status);
+        MPI_Recv(&valueNext, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD,
+                 &status);
 
-        if (M > 1) {
-          // 0
+        if (localRows > 1) {
+          // corner at i=0, j=0 (top/left)
           value[0][0] =
-              ((2 * value[0][0] + value[0][1] + value[1][0] + v_previous) / 5);
-          for (j = 1; j < J - 1; j++)
+              ((2 * value[0][0] + value[0][1] + value[1][0] + valuePrev) / 5);
+          for (j = 1; j < cols - 1; j++)
             value[0][j] = ((value[0][j - 1] + 2 * value[0][j] +
                             value[0][j + 1] + value[1][j]) /
                            5);
-          value[0][J - 1] =
-              ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
+          value[0][cols - 1] = ((value[0][cols - 2] + 2 * value[0][cols - 1] +
+                                 value[1][cols - 1]) /
+                                4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
                            5);
-            for (j = 1; j < J - 1; j++)
+            for (j = 1; j < cols - 1; j++)
               value[i][j] =
                   ((value[i][j - 1] + 2 * value[i][j] + value[i][j + 1] +
                     value[i + 1][j] + value[i - 1][j]) /
                    6);
-            value[i][J - 1] = ((value[i][J - 2] + 2 * value[i][J - 1] +
-                                value[i + 1][J - 1] + value[i - 1][J - 1]) /
-                               5);
+            value[i][cols - 1] =
+                ((value[i][cols - 2] + 2 * value[i][cols - 1] +
+                  value[i + 1][cols - 1] + value[i - 1][cols - 1]) /
+                 5);
           }
-          // M-1
-          value[M - 1][0] =
-              ((2 * value[M - 1][0] + value[M - 1][1] + value[M - 2][0]) / 4);
-          for (j = 1; j < J - 1; j++)
-            value[M - 1][j] = ((value[M - 1][j - 1] + 2 * value[M - 1][j] +
-                                value[M - 1][j + 1] + value[M - 2][j]) /
-                               5);
-          value[M - 1][J - 1] =
-              ((value[M - 1][J - 2] + 2 * value[M - 1][J - 1] +
-                value[M - 2][J - 1] + v_next) /
+          // last row (localRows - 1)
+          value[localRows - 1][0] =
+              ((2 * value[localRows - 1][0] + value[localRows - 1][1] +
+                value[localRows - 2][0]) /
+               4);
+          for (j = 1; j < cols - 1; j++)
+            value[localRows - 1][j] =
+                ((value[localRows - 1][j - 1] + 2 * value[localRows - 1][j] +
+                  value[localRows - 1][j + 1] + value[localRows - 2][j]) /
+                 5);
+          value[localRows - 1][cols - 1] =
+              ((value[localRows - 1][cols - 2] +
+                2 * value[localRows - 1][cols - 1] +
+                value[localRows - 2][cols - 1] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J <= 1)) {
-          // 0
-          value[0][0] = ((2 * value[0][0] + value[1][0] + v_previous) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
+        if ((localRows > 1) && (cols <= 1)) {
+          // corner at i=0, j=0 (top/left)
+          value[0][0] = ((2 * value[0][0] + value[1][0] + valuePrev) / 4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
-          // M-1
-          value[M - 1][0] =
-              ((value[M - 2][0] + 2 * value[M - 1][0] + v_next) / 4);
+          // last row (localRows - 1)
+          value[localRows - 1][0] = ((value[localRows - 2][0] +
+                                      2 * value[localRows - 1][0] + valueNext) /
+                                     4);
         }
 
-        if ((M <= 1) && (J > 1)) {
-          // 0
-          value[0][0] = ((2 * value[0][0] + value[0][1] + v_previous) / 4);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
+        if ((localRows <= 1) && (cols > 1)) {
+          // corner at i=0, j=0 (top/left)
+          value[0][0] = ((2 * value[0][0] + value[0][1] + valuePrev) / 4);
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
-          // J-1
-          value[0][J - 1] =
-              ((value[0][J - 2] + 2 * value[0][J - 1] + v_next) / 4);
+          // last column (cols - 1)
+          value[0][cols - 1] =
+              ((value[0][cols - 2] + 2 * value[0][cols - 1] + valueNext) / 4);
         }
 
-        if ((M <= 1) && (J <= 1)) {
-          value[0][0] =
-              ((2 * value[0][0] + value[0][1] + v_previous + v_next) / 5);
+        if ((localRows <= 1) && (cols <= 1)) {
+          value[0][0] = ((2 * value[0][0] + valuePrev + valueNext) / 4);
         }
       }
 
       if (rank == (size - 1)) {
         MPI_Send(&value[0][0], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
-        MPI_Recv(&v_previous, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
+        MPI_Recv(&valuePrev, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
                  &status);
 
-        if (M > 1) {
-          // 0
+        if (localRows > 1) {
+          // corner at i=0, j=0 (top/left)
           value[0][0] =
-              ((2 * value[0][0] + value[0][1] + value[1][0] + v_previous) / 5);
-          for (j = 1; j < J - 1; j++)
+              ((2 * value[0][0] + value[0][1] + value[1][0] + valuePrev) / 5);
+          for (j = 1; j < cols - 1; j++)
             value[0][j] = ((value[0][j - 1] + 2 * value[0][j] +
                             value[0][j + 1] + value[1][j]) /
                            5);
-          value[0][J - 1] =
-              ((value[0][J - 2] + 2 * value[0][J - 1] + value[1][J - 1]) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
+          value[0][cols - 1] = ((value[0][cols - 2] + 2 * value[0][cols - 1] +
+                                 value[1][cols - 1]) /
+                                4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
             value[i][0] = ((2 * value[i][0] + value[i][1] + value[i + 1][0] +
                             value[i - 1][0]) /
                            5);
-            for (j = 1; j < J - 1; j++)
+            for (j = 1; j < cols - 1; j++)
               value[i][j] =
                   ((value[i][j - 1] + 2 * value[i][j] + value[i][j + 1] +
                     value[i + 1][j] + value[i - 1][j]) /
                    6);
-            value[i][J - 1] = ((value[i][J - 2] + 2 * value[i][J - 1] +
-                                value[i + 1][J - 1] + value[i - 1][J - 1]) /
-                               5);
+            value[i][cols - 1] =
+                ((value[i][cols - 2] + 2 * value[i][cols - 1] +
+                  value[i + 1][cols - 1] + value[i - 1][cols - 1]) /
+                 5);
           }
-          // M-1
-          value[M - 1][0] =
-              ((2 * value[M - 1][0] + value[M - 1][1] + value[M - 2][0]) / 4);
-          for (j = 1; j < J - 1; j++)
-            value[M - 1][j] = ((value[M - 1][j - 1] + 2 * value[M - 1][j] +
-                                value[M - 1][j + 1] + value[M - 2][j]) /
-                               5);
-          value[M - 1][J - 1] =
-              ((value[M - 1][J - 2] + 2 * value[M - 1][J - 1] +
-                value[M - 2][J - 1]) /
+          // last row (localRows - 1)
+          value[localRows - 1][0] =
+              ((2 * value[localRows - 1][0] + value[localRows - 1][1] +
+                value[localRows - 2][0]) /
+               4);
+          for (j = 1; j < cols - 1; j++)
+            value[localRows - 1][j] =
+                ((value[localRows - 1][j - 1] + 2 * value[localRows - 1][j] +
+                  value[localRows - 1][j + 1] + value[localRows - 2][j]) /
+                 5);
+          value[localRows - 1][cols - 1] =
+              ((value[localRows - 1][cols - 2] +
+                2 * value[localRows - 1][cols - 1] +
+                value[localRows - 2][cols - 1]) /
                4);
         }
 
-        if ((M > 1) && (J <= 1)) {
-          // 0
-          value[0][0] = ((2 * value[0][0] + value[1][0] + v_previous) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
+        if ((localRows > 1) && (cols <= 1)) {
+          // corner at i=0, j=0 (top/left)
+          value[0][0] = ((2 * value[0][0] + value[1][0] + valuePrev) / 4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
             value[i][0] =
                 ((value[i - 1][0] + 2 * value[i][0] + value[i + 1][0]) / 4);
-          // M-1
-          value[M - 1][0] = ((value[M - 2][0] + 2 * value[M - 1][0]) / 3);
+          // last row (localRows - 1)
+          value[localRows - 1][0] =
+              ((value[localRows - 2][0] + 2 * value[localRows - 1][0]) / 3);
         }
 
-        if ((M <= 1) && (J > 1)) {
-          // 0
-          value[0][0] = ((2 * value[0][0] + value[0][1] + v_previous) / 4);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
+        if ((localRows <= 1) && (cols > 1)) {
+          // corner at i=0, j=0 (top/left)
+          value[0][0] = ((2 * value[0][0] + value[0][1] + valuePrev) / 4);
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
             value[0][j] =
                 ((value[0][j - 1] + 2 * value[0][j] + value[0][j + 1]) / 4);
-          // J-1
-          value[0][J - 1] = ((value[0][J - 2] + 2 * value[0][J - 1]) / 3);
+          // last column (cols - 1)
+          value[0][cols - 1] =
+              ((value[0][cols - 2] + 2 * value[0][cols - 1]) / 3);
         }
 
-        if ((M <= 1) && (J <= 1)) {
-          value[0][0] = ((2 * value[0][0] + value[0][1] + v_previous) / 4);
+        if ((localRows <= 1) && (cols <= 1)) {
+          value[0][0] = ((2 * value[0][0] + valuePrev) / 3);
         }
       }
     }
 
-    for (i = 0; i < M; i++) {
-      for (j = 0; j < J; j++)
-        printf("Result for rank %d at position i:%d j:%d was %f\n", rank,
-               i, j, value[i][j]);
+    for (i = 0; i < localRows; i++) {
+      for (j = 0; j < cols; j++)
+        printf("Result for rank %d at position i:%d j:%d was %f\n", rank, i, j,
+               value[i][j]);
     }
     MPI_Finalize();
   }

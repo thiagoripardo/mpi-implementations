@@ -2,16 +2,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* This code uses a dynamically allocated matrix, where I is the number of rows
-entered by the user, J is the number of columns entered by the user, and W is
-the depth. Depending on the number of processes, it divides the matrix rows
-evenly among them. The number of processes (size) must be a multiple of I and
-J. */
+#define IDX(i, j, w) (((i) * cols + (j)) * depth + (w))
+
+/* This code uses a dynamically allocated matrix with contiguous (embedded)
+memory layout, where rows and columns are entered by the user and depth is the
+third dimension. Depending on the number of processes, it divides the matrix
+rows evenly among them. The number of processes (size) must be a multiple of the
+row count and column count. */
 
 int main(int argc, char **argv) {
 
-  int rank, size, i, j, w, I, J, W, P, N, M, t, T, cont = 0;
-  float ***value, v_next, v_previous;
+  int rank, size, i, j, w, rows, cols, depth, elementsPerRank, localRows, step,
+      steps, counter = 0;
+  float *value, valueNext, valuePrev;
 
   MPI_Status status;
 
@@ -19,1236 +22,1313 @@ int main(int argc, char **argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  P = size;
-
   if (rank == 0) {
     printf("Enter the desired number of matrix rows:\n");
-    scanf("%d", &I);
+    scanf("%d", &rows);
     printf("Enter the desired number of matrix columns:\n");
-    scanf("%d", &J);
+    scanf("%d", &cols);
     printf("Enter the desired matrix depth:\n");
-    scanf("%d", &W);
+    scanf("%d", &depth);
     for (i = 1; i < size; i++) {
-      MPI_Send(&I, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
-      MPI_Send(&J, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
-      MPI_Send(&W, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+      MPI_Send(&rows, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+      MPI_Send(&cols, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+      MPI_Send(&depth, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
     }
   } else {
-    MPI_Recv(&I, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-    MPI_Recv(&J, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-    MPI_Recv(&W, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+    MPI_Recv(&rows, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+    MPI_Recv(&cols, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+    MPI_Recv(&depth, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
   }
 
-  if (I % P == 0) {
+  if (size == 1) {
+    if (rank == 0)
+      printf("This program requires at least 2 MPI processes.\n");
+    MPI_Finalize();
+    return 0;
+  }
 
-    M = I / P;
-    N = (I * J * W) / P;
+  if (rows % size == 0) {
 
-    value[i][j] = (float *)malloc((M * J * W) * sizeof(float));
+    localRows = rows / size;
+    elementsPerRank = (rows * cols * depth) / size;
+
+    value = (float *)malloc(localRows * cols * depth * sizeof(float));
 
     if (rank == 0) {
       printf("Enter the time steps:\n");
-      scanf("%d", &T);
+      scanf("%d", &steps);
       for (i = 1; i < size; i++)
-        MPI_Send(&T, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+        MPI_Send(&steps, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
     }
 
     else
-      MPI_Recv(&T, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
+      MPI_Recv(&steps, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
 
-    for (i = 0; i < M; i++) {
-      for (j = 0; j < J; j++) {
-        for (w = 0; w < W; w++) {
-          value[(i * J + j) * W + w] = (N * rank + cont);
-          cont++;
+    for (i = 0; i < localRows; i++) {
+      for (j = 0; j < cols; j++) {
+        for (w = 0; w < depth; w++) {
+          value[IDX(i, j, w)] = (elementsPerRank * rank + counter);
+          counter++;
         }
       }
     }
 
-    for (t = 1; t <= T; t++) {
+    for (step = 1; step <= steps; step++) {
 
       if (rank == 0) {
 
-        MPI_Send(&value[((M - 1) * J + (J - 1)) * W + (W - 1)], 1, MPI_FLOAT,
+        MPI_Send(&value[IDX(localRows - 1, cols - 1, depth - 1)], 1, MPI_FLOAT,
                  (rank + 1), 1, MPI_COMM_WORLD);
-        MPI_Recv(&v_next, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD, &status);
+        MPI_Recv(&valueNext, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD,
+                 &status);
 
-        if ((M > 1) && (J > 1) && (W > 1)) {
+        if ((localRows > 1) && (cols > 1) && (depth > 1)) {
 
-          // 0
-          value[(0 * J + 0) * W + 0] =
-              ((2 * value[(0 * J + 0) * W + 0] + value[(0 * J + 1) * W + 0] +
-                value[(1 * J + 0) * W + 0] + value[(0 * J + 0) * W + 1]) /
-               5);
-          // i == 0; j==0;
-          for (w = 1; w < W - 1; w++) {
-            value[(0 * J + 0) * W + w] =
-                ((value[(0 * J + 0) * W + (w - 1)] +
-                  2 * value[(0 * J + 0) * W + w] +
-                  value[(0 * J + 0) * W + (w + 1)] +
-                  value[(0 * J + 1) * W + w] + value[(1 * J + 0) * W + w]) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] +
+                             value[IDX(1, 0, 0)] + value[IDX(0, 0, 1)]) /
+                            5);
+          // edge along depth at i=0, j=0 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] =
+                ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] + value[IDX(0, 0, w + 1)] +
+                  value[IDX(0, 1, w)] + value[IDX(1, 0, w)]) /
                  6);
           }
-          value[(0 * J + 0) * W + (W - 1)] =
-              ((value[(0 * J + 0) * W + (W - 2)] +
-                2 * value[(0 * J + 0) * W + (W - 1)] +
-                value[(0 * J + 1) * W + (W - 1)] +
-                value[(1 * J + 0) * W + (W - 1)]) /
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)] + value[IDX(1, 0, depth - 1)]) /
                5);
-          // i == 0; w == 0;
-          for (j = 1; j < J - 1; j++) {
-                                                value(0*J+j)*W+0]=((value[(0*J+(j-1))*W+0]+2*value[(0*J+j)*W+0]+value[(0*J+(j+1))*W+0]+value[(1*J+j)*W+0]+value[(0*J+j)*W+1])/6);
+          // edge along columns at i=0, w=0 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] =
+                ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] + value[IDX(0, j + 1, 0)] +
+                  value[IDX(1, j, 0)] + value[IDX(0, j, 1)]) /
+                 6);
           }
-                                        value[(0*J+(J-1))*W+0]=((value[0*J+(J-2))*W+0]+2*value[0*J+(J-1))*W+0]+value[0*J+(J-1))*W+1]+value[1*J+(J-1))*W+0])/5);
-                                        // i == 0; w == W-1;
-                                        for (j = 1; j < J - 1; j++) {
-                                                value[0*J+j)*W+(W-1)]=((value[0*J+(j-1))*W+(W-1)]+2*value[0*J+j)*W+(W-1)]+value[0*J+(j+1))*W+(W-1)]+value[1*J+j)*W+(W-1)]+value[0*J+j)*W+(W-2)])/6); // ***********************An error was found here***************************
-                                        }
-                                        value[0*J+(J-1))*W+(W-1)]=((value[0*J+(J-1))*W+(W-2)]+2*value[0*J+(J-1))*W+(W-1)]+value[0*J+(J-2))*W+(W-1)]+value[1*J+(J-1))*W+(W-1)])/5);
-                                        // i == 0; j == J-1;
-                                        for (w = 1; w < W - 1; w++) {
-                                                value[0*J+(J-1))*W+w]=((value[0*J+(J-1))*W+(w-1)]+2*value[0*J+(J-1))*W+w]+value[0*J+(J-1))*W+(w+1)]+value[0*J+(J-2))*W+w]+value[1*J+(J-1))*W+w])/6);
-                                        }
-                                        // general case
-                                        for (j = 1; j < J - 1; j++) {
-                                          for (w = 1; w < W - 1; w++) {
-                                            value[0][j][w] =
-                                                ((value[0][j][w - 1] +
-                                                  2 * value[0][j][w] +
-                                                  value[0][j][w + 1] +
-                                                  value[0][j + 1][w] +
-                                                  value[0][j - 1][w] +
-                                                  value[1][j][w]) /
-                                                 7);
-                                          }
-                                        }
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(0, cols - 1, 1)] + value[IDX(1, cols - 1, 0)]) /
+               5);
+          // edge along columns at i=0, w=depth-1 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j - 1, depth - 1)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(1, j, depth - 1)] +
+                  value[IDX(0, j, depth - 1)]) /
+                 6);
+          }
+          value[IDX(0, cols - 1, depth - 1)] =
+              ((value[IDX(0, cols - 1, depth - 2)] +
+                2 * value[IDX(0, cols - 1, depth - 1)] +
+                value[IDX(0, cols - 2, depth - 1)] + value[IDX(1, cols - 1, depth - 1)]) /
+               5);
+          // edge along depth at i=0, j=cols-1 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)] +
+                  value[IDX(1, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)] + value[IDX(1, j, w)]) /
+                                7);
+            }
+          }
 
-                                        // between 0 and M-1
-                                        for (i = 1; i < M - 1; i++) {
-                                          value[i][0][0] =
-                                              ((2 * value[i][0][0] +
-                                                value[i][1][0] +
-                                                value[i + 1][0][0] +
-                                                value[i][0][1]) /
-                                               5);
-                                          // j==0;
-                                          for (w = 1; w < W - 1; w++) {
-                                            value[i][0][w] =
-                                                ((value[i][0][w - 1] +
-                                                  2 * value[i][0][w] +
-                                                  value[i][0][w + 1] +
-                                                  value[i][1][w] +
-                                                  value[i + 1][0][w]) /
-                                                 6);
-                                          }
-                                          value[i][0][W - 1] =
-                                              ((value[i][0][W - 2] +
-                                                2 * value[i][0][W - 1] +
-                                                value[i][1][W - 1] +
-                                                value[i + 1][0][W - 1]) /
-                                               5);
-                                          // w == 0;
-                                          for (j = 1; j < J - 1; j++) {
-                                            value[i][j][0] =
-                                                ((value[i][j - 1][0] +
-                                                  2 * value[i][j][0] +
-                                                  value[i][j + 1][0] +
-                                                  value[i + 1][j][0] +
-                                                  value[i][j][1]) /
-                                                 6);
-                                          }
-                                          value[i][J - 1][0] =
-                                              ((value[i][J - 2][0] +
-                                                2 * value[i][J - 1][0] +
-                                                value[i][J - 1][1] +
-                                                value[i + 1][J - 1][0]) /
-                                               5);
-                                          // w == W-1;
-                                          for (j = 1; j < J - 1; j++) {
-                                            value[i][j][W - 1] =
-                                                ((value[i][j - 1][W - 1] +
-                                                  2 * value[i][j][W - 1] +
-                                                  value[i][j + 1][W - 1] +
-                                                  value[i + 1][j][W - 1] +
-                                                  value[i][j][W - 1]) /
-                                                 6);
-                                          }
-                                          value[i][J - 1][W - 1] =
-                                              ((value[i][J - 1][W - 2] +
-                                                2 * value[i][J - 1][W - 1] +
-                                                value[i][J - 2][W - 1] +
-                                                value[i + 1][J - 1][W - 1]) /
-                                               5);
-                                          // j == J-1;
-                                          for (w = 1; w < W - 1; w++) {
-                                            value[i][J - 1][w] =
-                                                ((value[i][J - 1][w - 1] +
-                                                  2 * value[i][J - 1][w] +
-                                                  value[i][J - 1][w + 1] +
-                                                  value[i][J - 2][w] +
-                                                  value[i + 1][J - 1][w]) /
-                                                 6);
-                                          }
-                                          // general case
-                                          for (j = 1; j < J - 1; j++) {
-                                            for (w = 1; w < W - 1; w++) {
-                                              value[i][j][w] =
-                                                  ((value[i][j][w - 1] +
-                                                    2 * value[i][j][w] +
-                                                    value[i][j][w + 1] +
-                                                    value[i][j + 1][w] +
-                                                    value[i][j - 1][w] +
-                                                    value[i - 1][j][w] +
-                                                    value[i + 1][j][w]) /
-                                                   8);
-                                            }
-                                          }
-                                        }
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i, 1, 0)] +
+                               value[IDX(i + 1, 0, 0)] + value[IDX(i, 0, 1)]) /
+                              5);
+            // left face (j=0)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] =
+                  ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                    value[IDX(i, 0, w + 1)] + value[IDX(i, 1, w)] + value[IDX(i + 1, 0, w)]) /
+                   6);
+            }
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i, 1, depth - 1)] + value[IDX(i + 1, 0, depth - 1)]) /
+                 5);
+            // front face (w=0)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] =
+                  ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                    value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] + value[IDX(i, j, 1)]) /
+                   6);
+            }
+            value[IDX(i, cols - 1, 0)] =
+                ((value[IDX(i, cols - 2, 0)] + 2 * value[IDX(i, cols - 1, 0)] +
+                  value[IDX(i, cols - 1, 1)] + value[IDX(i + 1, cols - 1, 0)]) /
+                 5);
+            // back face (w=depth-1)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, depth - 1)] =
+                  ((value[IDX(i, j - 1, depth - 1)] + 2 * value[IDX(i, j, depth - 1)] +
+                    value[IDX(i, j + 1, depth - 1)] + value[IDX(i + 1, j, depth - 1)] +
+                    value[IDX(i, j, depth - 1)]) /
+                   6);
+            }
+            value[IDX(i, cols - 1, depth - 1)] =
+                ((value[IDX(i, cols - 1, depth - 2)] +
+                  2 * value[IDX(i, cols - 1, depth - 1)] +
+                  value[IDX(i, cols - 2, depth - 1)] +
+                  value[IDX(i + 1, cols - 1, depth - 1)]) /
+                 5);
+            // right face (j=cols-1)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, cols - 1, w)] =
+                  ((value[IDX(i, cols - 1, w - 1)] + 2 * value[IDX(i, cols - 1, w)] +
+                    value[IDX(i, cols - 1, w + 1)] + value[IDX(i, cols - 2, w)] +
+                    value[IDX(i + 1, cols - 1, w)]) /
+                   6);
+            }
+            // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+            // in 1..depth-2)
+            for (j = 1; j < cols - 1; j++) {
+              for (w = 1; w < depth - 1; w++) {
+                value[IDX(i, j, w)] = ((value[IDX(i, j, w - 1)] + 2 * value[IDX(i, j, w)] +
+                                   value[IDX(i, j, w + 1)] + value[IDX(i, j + 1, w)] +
+                                   value[IDX(i, j - 1, w)] + value[IDX(i - 1, j, w)] +
+                                   value[IDX(i + 1, j, w)]) /
+                                  8);
+              }
+            }
+          }
 
-                                        // M-1
-                                        value[M - 1][0][0] =
-                                            ((2 * value[M - 1][0][0] +
-                                              value[M - 1][1][0] +
-                                              value[M - 2][0][0] +
-                                              value[M - 1][0][1]) /
-                                             5);
-                                        // i == M-1; j==0;
-                                        for (w = 1; w < W - 1; w++) {
-                                          value[M - 1][0][w] =
-                                              ((value[M - 1][0][w - 1] +
-                                                2 * value[M - 1][0][w] +
-                                                value[M - 1][0][w + 1] +
-                                                value[M - 1][1][w] +
-                                                value[M - 2][0][w]) /
-                                               6);
-                                        }
-                                        value[M - 1][0][W - 1] =
-                                            ((value[M - 1][0][W - 2] +
-                                              2 * value[M - 1][0][W - 1] +
-                                              value[M - 1][1][W - 1] +
-                                              value[M - 2][0][W - 1]) /
-                                             5);
-                                        // i == M-1; w == 0;
-                                        for (j = 1; j < J - 1; j++) {
-                                          value[M - 1][j][0] =
-                                              ((value[M - 1][j - 1][0] +
-                                                2 * value[M - 1][j][0] +
-                                                value[M - 1][j + 1][0] +
-                                                value[M - 2][j][0] +
-                                                value[M - 1][j][1]) /
-                                               6);
-                                        }
-                                        value[M - 1][J - 1][0] =
-                                            ((value[M - 1][J - 2][0] +
-                                              2 * value[M - 1][J - 1][0] +
-                                              value[M - 1][J - 1][1] +
-                                              value[M - 2][J - 1][0]) /
-                                             5);
-                                        // i == M-1; w == W-1;
-                                        for (j = 1; j < J - 1; j++) {
-                                          value[M - 1][j][W - 1] =
-                                              ((value[M - 1][j - 1][W - 1] +
-                                                2 * value[M - 1][j][W - 1] +
-                                                value[M - 1][j + 1][W - 1] +
-                                                value[M - 2][j][W - 1] +
-                                                value[M - 1][j][W - 1]) /
-                                               6);
-                                        }
-                                        // i == M-1; j == J-1;
-                                        for (w = 1; w < W - 1; w++) {
-                                          value[M - 1][J - 1][w] =
-                                              ((value[M - 1][J - 1][w - 1] +
-                                                2 * value[M - 1][J - 1][w] +
-                                                value[M - 1][J - 1][w + 1] +
-                                                value[M - 1][J - 2][w] +
-                                                value[M - 2][J - 1][w]) /
-                                               6);
-                                        }
-                                        // general case
-                                        for (j = 1; j < J - 1; j++) {
-                                          for (w = 1; w < W - 1; w++) {
-                                            value[M - 1][j][w] =
-                                                ((value[M - 1][j][w - 1] +
-                                                  2 * value[M - 1][j][w] +
-                                                  value[M - 1][j][w + 1] +
-                                                  value[M - 1][j + 1][w] +
-                                                  value[M - 1][j - 1][w] +
-                                                  value[M - 2][j][w]) /
-                                                 7);
-                                          }
-                                        }
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 1, 1, 0)] +
+                value[IDX(localRows - 2, 0, 0)] + value[IDX(localRows - 1, 0, 1)]) /
+               5);
+          // bottom-left edge (i=localRows-1, j=0)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 1, 1, w)] +
+                  value[IDX(localRows - 2, 0, w)]) /
+                 6);
+          }
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 1, 1, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)]) /
+               5);
+          // bottom-front edge (i=localRows-1, w=0)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, 0)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)] +
+                  value[IDX(localRows - 1, j, 1)]) /
+                 6);
+          }
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 1, cols - 1, 1)] +
+                value[IDX(localRows - 2, cols - 1, 0)]) /
+               5);
+          // bottom-back edge (i=localRows-1, w=depth-1)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, depth - 1)] =
+                ((value[IDX(localRows - 1, j - 1, depth - 1)] +
+                  2 * value[IDX(localRows - 1, j, depth - 1)] +
+                  value[IDX(localRows - 1, j + 1, depth - 1)] +
+                  value[IDX(localRows - 2, j, depth - 1)] +
+                  value[IDX(localRows - 1, j, depth - 1)]) /
+                 6);
+          }
+          // bottom-right edge (i=localRows-1, j=cols-1)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, cols - 1, w)] =
+                ((value[IDX(localRows - 1, cols - 1, w - 1)] +
+                  2 * value[IDX(localRows - 1, cols - 1, w)] +
+                  value[IDX(localRows - 1, cols - 1, w + 1)] +
+                  value[IDX(localRows - 1, cols - 2, w)] +
+                  value[IDX(localRows - 2, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(localRows - 1, j, w)] = ((value[IDX(localRows - 1, j, w - 1)] +
+                                             2 * value[IDX(localRows - 1, j, w)] +
+                                             value[IDX(localRows - 1, j, w + 1)] +
+                                             value[IDX(localRows - 1, j + 1, w)] +
+                                             value[IDX(localRows - 1, j - 1, w)] +
+                                             value[IDX(localRows - 2, j, w)]) /
+                                            7);
+            }
+          }
 
-                                        value[M - 1][J - 1][W - 1] =
-                                            ((value[M - 1][J - 1][W - 2] +
-                                              2 * value[M - 1][J - 1][W - 1] +
-                                              value[M - 1][J - 2][W - 1] +
-                                              value[M - 2][J - 1][W - 1] +
-                                              v_next) /
-                                             6);
+          value[IDX(localRows - 1, cols - 1, depth - 1)] =
+              ((value[IDX(localRows - 1, cols - 1, depth - 2)] +
+                2 * value[IDX(localRows - 1, cols - 1, depth - 1)] +
+                value[IDX(localRows - 1, cols - 2, depth - 1)] +
+                value[IDX(localRows - 2, cols - 1, depth - 1)] + valueNext) /
+               6);
         }
 
-        if ((M > 1) && (J <= 1) && (W > 1)) {
+        if ((localRows > 1) && (cols <= 1) && (depth > 1)) {
 
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[1][0][0] + value[0][0][1]) / 4);
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] + value[IDX(0, 0, 1)]) / 4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[1][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(1, 0, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[1][0][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(1, 0, depth - 1)]) /
+               4);
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][0][1] + value[i - 1][0][0]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 0, 1)] + value[IDX(i - 1, 0, 0)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[i][0][w] = ((value[i][0][w - 1] + 2 * value[i][0][w] +
-                                 value[i][0][w + 1] + value[i + 1][0][w] +
-                                 value[i - 1][0][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] = ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                                 value[IDX(i, 0, w + 1)] + value[IDX(i + 1, 0, w)] +
+                                 value[IDX(i - 1, 0, w)]) /
                                 6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
                  5);
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][0][1]) /
-                                4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 0, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][0][w] =
-                ((value[M - 1][0][w - 1] + 2 * value[M - 1][0][w] +
-                  value[M - 1][0][w + 1] + value[M - 2][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 2, 0, w)]) /
                  5);
           }
-          value[M - 1][0][W - 1] =
-              ((value[M - 1][0][W - 2] + 2 * value[M - 1][0][W - 1] +
-                value[M - 2][0][W - 1] + v_next) /
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)] + valueNext) /
                5);
         }
 
-        if ((M <= 1) && (J > 1) && (W > 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[0][1][0] + value[0][0][1]) / 4);
+        if ((localRows <= 1) && (cols > 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] + value[IDX(0, 0, 1)]) / 4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[0][1][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(0, 1, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[0][1][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)]) /
+               4);
 
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((2 * value[0][j][0] + value[0][j - 1][0] +
-                               value[0][j + 1][0] + value[0][j][1]) /
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((2 * value[IDX(0, j, 0)] + value[IDX(0, j - 1, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(0, j, 1)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[0][j][w] = ((value[0][j][w - 1] + 2 * value[0][j][w] +
-                                 value[0][j][w + 1] + value[0][j + 1][w] +
-                                 value[0][j - 1][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)]) /
                                 6);
             }
-            value[0][j][W - 1] =
-                ((value[0][j][W - 2] + 2 * value[0][j][W - 1] +
-                  value[0][j + 1][W - 1] + value[0][j - 1][W - 1]) /
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j, depth - 2)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(0, j - 1, depth - 1)]) /
                  5);
           }
 
-          // J-1
-          value[0][J - 1][0] = ((2 * value[0][J - 1][0] + value[0][J - 2][0] +
-                                 value[0][J - 1][1]) /
-                                4);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((2 * value[IDX(0, cols - 1, 0)] + value[IDX(0, cols - 2, 0)] +
+                value[IDX(0, cols - 1, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][J - 1][w] =
-                ((value[0][J - 1][w - 1] + 2 * value[0][J - 1][w] +
-                  value[0][J - 1][w + 1] + value[0][J - 2][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)]) /
                  5);
           }
-          value[0][J - 1][W - 1] =
-              ((value[0][J - 1][W - 2] + 2 * value[0][J - 1][W - 1] +
-                value[0][J - 2][W - 1] + v_next) /
+          value[IDX(0, cols - 1, depth - 1)] =
+              ((value[IDX(0, cols - 1, depth - 2)] +
+                2 * value[IDX(0, cols - 1, depth - 1)] +
+                value[IDX(0, cols - 2, depth - 1)] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J > 1) && (W <= 1)) {
+        if ((localRows > 1) && (cols > 1) && (depth <= 1)) {
 
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[1][0][0] + value[0][1][0]) / 4);
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] + value[IDX(0, 1, 0)]) / 4);
 
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0] + value[1][j][0]) /
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(1, j, 0)]) /
                               5);
           }
-          value[0][J - 1][0] = ((value[0][J - 2][0] + 2 * value[0][J - 1][0] +
-                                 value[1][J - 1][0]) /
-                                4);
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(1, cols - 1, 0)]) /
+               4);
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][1][0] + value[i - 1][0][0]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 1, 0)] + value[IDX(i - 1, 0, 0)]) /
                               5);
 
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][0] = ((value[i][j - 1][0] + 2 * value[i][j][0] +
-                                 value[i][j + 1][0] + value[i + 1][j][0] +
-                                 value[i - 1][j][0]) /
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] = ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                                 value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] +
+                                 value[IDX(i - 1, j, 0)]) /
                                 6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
                  5);
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][1][0]) /
-                                4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 1, 0)]) /
+               4);
 
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][0][j] =
-                ((value[M - 1][j - 1][0] + 2 * value[M - 1][j][0] +
-                  value[M - 1][j + 1][0] + value[M - 2][j][0]) /
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, 0, j)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)]) /
                  5);
           }
-          value[M - 1][J - 1][0] =
-              ((value[M - 1][J - 2][0] + 2 * value[M - 1][J - 1][0] +
-                value[M - 2][J - 1][0] + v_next) /
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 2, cols - 1, 0)] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J <= 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[1][0][0]) / 3);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
-            value[i][0][0] = ((value[i - 1][0][0] + 2 * value[i][0][0] +
-                               value[i + 1][0][0]) /
+        if ((localRows > 1) && (cols <= 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)]) / 3);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
+            value[IDX(i, 0, 0)] = ((value[IDX(i - 1, 0, 0)] + 2 * value[IDX(i, 0, 0)] +
+                               value[IDX(i + 1, 0, 0)]) /
                               4);
-          // M-1
-          value[M - 1][0][0] =
-              ((value[M - 2][0][0] + 2 * value[M - 1][0][0] + v_next) / 4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((value[IDX(localRows - 2, 0, 0)] + 2 * value[IDX(localRows - 1, 0, 0)] +
+                valueNext) /
+               4);
         }
 
-        if ((M <= 1) && (J > 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][1][0]) / 3);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0]) /
+        if ((localRows <= 1) && (cols > 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)]) / 3);
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)]) /
                               4);
-          // J-1
-          value[0][J - 1][0] =
-              ((value[0][J - 2][0] + 2 * value[0][J - 1][0] + v_next) / 4);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] + valueNext) /
+               4);
         }
 
-        if ((M <= 1) && (J <= 1) && (W > 1)) {
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][0][1]) / 3);
-          // between 0 and W-1
-          for (w = 1; w < W - 1; w++)
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1]) /
+        if ((localRows <= 1) && (cols <= 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 0, 1)]) / 3);
+          // interior depth (w in 1..depth-2)
+          for (w = 1; w < depth - 1; w++)
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)]) /
                               4);
-          // W-1
-          value[0][0][W - 1] =
-              ((value[0][0][W - 2] + 2 * value[0][0][W - 1] + v_next) / 4);
+          // back face (w=depth-1)
+          value[IDX(0, 0, depth - 1)] = ((value[IDX(0, 0, depth - 2)] +
+                                     2 * value[IDX(0, 0, depth - 1)] + valueNext) /
+                                    4);
         }
 
-        if ((M <= 1) && (J <= 1) && (W <= 1))
-          value[0][0][0] = ((2 * value[0][0][0] + v_next) / 3);
+        if ((localRows <= 1) && (cols <= 1) && (depth <= 1))
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + valueNext) / 3);
       }
 
       if ((rank > 0) && (rank < (size - 1))) {
 
-        MPI_Send(&value[0][0][0], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
-        MPI_Send(&value[M - 1][J - 1][W - 1], 1, MPI_FLOAT, (rank + 1), 1,
-                 MPI_COMM_WORLD);
-        MPI_Recv(&v_previous, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
+        MPI_Send(&value[IDX(0, 0, 0)], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
+        MPI_Send(&value[IDX(localRows - 1, cols - 1, depth - 1)], 1, MPI_FLOAT,
+                 (rank + 1), 1, MPI_COMM_WORLD);
+        MPI_Recv(&valuePrev, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
                  &status);
-        MPI_Recv(&v_next, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD, &status);
+        MPI_Recv(&valueNext, 1, MPI_FLOAT, (rank + 1), 1, MPI_COMM_WORLD,
+                 &status);
 
-        if ((M > 1) && (J > 1) && (W > 1)) {
+        if ((localRows > 1) && (cols > 1) && (depth > 1)) {
 
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][1][0] +
-                             value[1][0][0] + value[0][0][1] + v_previous) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] +
+                             value[IDX(1, 0, 0)] + value[IDX(0, 0, 1)] + valuePrev) /
                             6);
-          // i == 0; j==0;
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] =
-                ((value[0][0][w - 1] + 2 * value[0][0][w] + value[0][0][w + 1] +
-                  value[0][1][w] + value[1][0][w]) /
+          // edge along depth at i=0, j=0 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] =
+                ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] + value[IDX(0, 0, w + 1)] +
+                  value[IDX(0, 1, w)] + value[IDX(1, 0, w)]) /
                  6);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[0][1][W - 1] + value[1][0][W - 1]) /
-                                5);
-          // i == 0; w == 0;
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] =
-                ((value[0][j - 1][0] + 2 * value[0][j][0] + value[0][j + 1][0] +
-                  value[1][j][0] + value[0][j][1]) /
-                 6);
-          }
-          value[0][J - 1][0] = ((value[0][J - 2][0] + 2 * value[0][J - 1][0] +
-                                 value[0][J - 1][1] + value[1][J - 1][0]) /
-                                5);
-          // i == 0; w == W-1;
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][W - 1] =
-                ((value[0][j - 1][W - 1] + 2 * value[0][j][W - 1] +
-                  value[0][j + 1][W - 1] + value[1][j][W - 1] +
-                  value[0][j][W - 1]) /
-                 6);
-          }
-          value[0][J - 1][W - 1] =
-              ((value[0][J - 1][W - 2] + 2 * value[0][J - 1][W - 1] +
-                value[0][J - 2][W - 1] + value[1][J - 1][W - 1]) /
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)] + value[IDX(1, 0, depth - 1)]) /
                5);
-          // i == 0; j == J-1;
-          for (w = 1; w < W - 1; w++) {
-            value[0][J - 1][w] =
-                ((value[0][J - 1][w - 1] + 2 * value[0][J - 1][w] +
-                  value[0][J - 1][w + 1] + value[0][J - 2][w] +
-                  value[1][J - 1][w]) /
+          // edge along columns at i=0, w=0 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] =
+                ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] + value[IDX(0, j + 1, 0)] +
+                  value[IDX(1, j, 0)] + value[IDX(0, j, 1)]) /
                  6);
           }
-          // general case
-          for (j = 1; j < J - 1; j++) {
-            for (w = 1; w < W - 1; w++) {
-              value[0][j][w] = ((value[0][j][w - 1] + 2 * value[0][j][w] +
-                                 value[0][j][w + 1] + value[0][j + 1][w] +
-                                 value[0][j - 1][w] + value[1][j][w]) /
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(0, cols - 1, 1)] + value[IDX(1, cols - 1, 0)]) /
+               5);
+          // edge along columns at i=0, w=depth-1 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j - 1, depth - 1)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(1, j, depth - 1)] +
+                  value[IDX(0, j, depth - 1)]) /
+                 6);
+          }
+          value[IDX(0, cols - 1, depth - 1)] =
+              ((value[IDX(0, cols - 1, depth - 2)] +
+                2 * value[IDX(0, cols - 1, depth - 1)] +
+                value[IDX(0, cols - 2, depth - 1)] + value[IDX(1, cols - 1, depth - 1)]) /
+               5);
+          // edge along depth at i=0, j=cols-1 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)] +
+                  value[IDX(1, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)] + value[IDX(1, j, w)]) /
                                 7);
             }
           }
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i][1][0] +
-                               value[i + 1][0][0] + value[i][0][1]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i, 1, 0)] +
+                               value[IDX(i + 1, 0, 0)] + value[IDX(i, 0, 1)]) /
                               5);
-            // j==0;
-            for (w = 1; w < W - 1; w++) {
-              value[i][0][w] =
-                  ((value[i][0][w - 1] + 2 * value[i][0][w] +
-                    value[i][0][w + 1] + value[i][1][w] + value[i + 1][0][w]) /
+            // left face (j=0)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] =
+                  ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                    value[IDX(i, 0, w + 1)] + value[IDX(i, 1, w)] + value[IDX(i + 1, 0, w)]) /
                    6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i][1][W - 1] + value[i + 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i, 1, depth - 1)] + value[IDX(i + 1, 0, depth - 1)]) /
                  5);
-            // w == 0;
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][0] =
-                  ((value[i][j - 1][0] + 2 * value[i][j][0] +
-                    value[i][j + 1][0] + value[i + 1][j][0] + value[i][j][1]) /
+            // front face (w=0)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] =
+                  ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                    value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] + value[IDX(i, j, 1)]) /
                    6);
             }
-            value[i][J - 1][0] =
-                ((value[i][J - 2][0] + 2 * value[i][J - 1][0] +
-                  value[i][J - 1][1] + value[i + 1][J - 1][0]) /
+            value[IDX(i, cols - 1, 0)] =
+                ((value[IDX(i, cols - 2, 0)] + 2 * value[IDX(i, cols - 1, 0)] +
+                  value[IDX(i, cols - 1, 1)] + value[IDX(i + 1, cols - 1, 0)]) /
                  5);
-            // w == W-1;
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][W - 1] =
-                  ((value[i][j - 1][W - 1] + 2 * value[i][j][W - 1] +
-                    value[i][j + 1][W - 1] + value[i + 1][j][W - 1] +
-                    value[i][j][W - 1]) /
+            // back face (w=depth-1)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, depth - 1)] =
+                  ((value[IDX(i, j - 1, depth - 1)] + 2 * value[IDX(i, j, depth - 1)] +
+                    value[IDX(i, j + 1, depth - 1)] + value[IDX(i + 1, j, depth - 1)] +
+                    value[IDX(i, j, depth - 1)]) /
                    6);
             }
-            value[i][J - 1][W - 1] =
-                ((value[i][J - 1][W - 2] + 2 * value[i][J - 1][W - 1] +
-                  value[i][J - 2][W - 1] + value[i + 1][J - 1][W - 1]) /
+            value[IDX(i, cols - 1, depth - 1)] =
+                ((value[IDX(i, cols - 1, depth - 2)] +
+                  2 * value[IDX(i, cols - 1, depth - 1)] +
+                  value[IDX(i, cols - 2, depth - 1)] +
+                  value[IDX(i + 1, cols - 1, depth - 1)]) /
                  5);
-            // j == J-1;
-            for (w = 1; w < W - 1; w++) {
-              value[i][J - 1][w] =
-                  ((value[i][J - 1][w - 1] + 2 * value[i][J - 1][w] +
-                    value[i][J - 1][w + 1] + value[i][J - 2][w] +
-                    value[i + 1][J - 1][w]) /
+            // right face (j=cols-1)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, cols - 1, w)] =
+                  ((value[IDX(i, cols - 1, w - 1)] + 2 * value[IDX(i, cols - 1, w)] +
+                    value[IDX(i, cols - 1, w + 1)] + value[IDX(i, cols - 2, w)] +
+                    value[IDX(i + 1, cols - 1, w)]) /
                    6);
             }
-            // general case
-            for (j = 1; j < J - 1; j++) {
-              for (w = 1; w < W - 1; w++) {
-                value[i][j][w] = ((value[i][j][w - 1] + 2 * value[i][j][w] +
-                                   value[i][j][w + 1] + value[i][j + 1][w] +
-                                   value[i][j - 1][w] + value[i - 1][j][w] +
-                                   value[i + 1][j][w]) /
+            // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+            // in 1..depth-2)
+            for (j = 1; j < cols - 1; j++) {
+              for (w = 1; w < depth - 1; w++) {
+                value[IDX(i, j, w)] = ((value[IDX(i, j, w - 1)] + 2 * value[IDX(i, j, w)] +
+                                   value[IDX(i, j, w + 1)] + value[IDX(i, j + 1, w)] +
+                                   value[IDX(i, j - 1, w)] + value[IDX(i - 1, j, w)] +
+                                   value[IDX(i + 1, j, w)]) /
                                   8);
               }
             }
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 1][1][0] +
-                                 value[M - 2][0][0] + value[M - 1][0][1]) /
-                                5);
-          // i == M-1; j==0;
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][0][w] =
-                ((value[M - 1][0][w - 1] + 2 * value[M - 1][0][w] +
-                  value[M - 1][0][w + 1] + value[M - 1][1][w] +
-                  value[M - 2][0][w]) /
-                 6);
-          }
-          value[M - 1][0][W - 1] =
-              ((value[M - 1][0][W - 2] + 2 * value[M - 1][0][W - 1] +
-                value[M - 1][1][W - 1] + value[M - 2][0][W - 1]) /
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 1, 1, 0)] +
+                value[IDX(localRows - 2, 0, 0)] + value[IDX(localRows - 1, 0, 1)]) /
                5);
-          // i == M-1; w == 0;
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][j][0] =
-                ((value[M - 1][j - 1][0] + 2 * value[M - 1][j][0] +
-                  value[M - 1][j + 1][0] + value[M - 2][j][0] +
-                  value[M - 1][j][1]) /
+          // bottom-left edge (i=localRows-1, j=0)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 1, 1, w)] +
+                  value[IDX(localRows - 2, 0, w)]) /
                  6);
           }
-          value[M - 1][J - 1][0] =
-              ((value[M - 1][J - 2][0] + 2 * value[M - 1][J - 1][0] +
-                value[M - 1][J - 1][1] + value[M - 2][J - 1][0]) /
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 1, 1, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)]) /
                5);
-          // i == M-1; w == W-1;
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][j][W - 1] =
-                ((value[M - 1][j - 1][W - 1] + 2 * value[M - 1][j][W - 1] +
-                  value[M - 1][j + 1][W - 1] + value[M - 2][j][W - 1] +
-                  value[M - 1][j][W - 1]) /
+          // bottom-front edge (i=localRows-1, w=0)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, 0)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)] +
+                  value[IDX(localRows - 1, j, 1)]) /
                  6);
           }
-          // i == M-1; j == J-1;
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][J - 1][w] =
-                ((value[M - 1][J - 1][w - 1] + 2 * value[M - 1][J - 1][w] +
-                  value[M - 1][J - 1][w + 1] + value[M - 1][J - 2][w] +
-                  value[M - 2][J - 1][w]) /
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 1, cols - 1, 1)] +
+                value[IDX(localRows - 2, cols - 1, 0)]) /
+               5);
+          // bottom-back edge (i=localRows-1, w=depth-1)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, depth - 1)] =
+                ((value[IDX(localRows - 1, j - 1, depth - 1)] +
+                  2 * value[IDX(localRows - 1, j, depth - 1)] +
+                  value[IDX(localRows - 1, j + 1, depth - 1)] +
+                  value[IDX(localRows - 2, j, depth - 1)] +
+                  value[IDX(localRows - 1, j, depth - 1)]) /
                  6);
           }
-          // general case
-          for (j = 1; j < J - 1; j++) {
-            for (w = 1; w < W - 1; w++) {
-              value[M - 1][j][w] =
-                  ((value[M - 1][j][w - 1] + 2 * value[M - 1][j][w] +
-                    value[M - 1][j][w + 1] + value[M - 1][j + 1][w] +
-                    value[M - 1][j - 1][w] + value[M - 2][j][w]) /
-                   7);
+          // bottom-right edge (i=localRows-1, j=cols-1)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, cols - 1, w)] =
+                ((value[IDX(localRows - 1, cols - 1, w - 1)] +
+                  2 * value[IDX(localRows - 1, cols - 1, w)] +
+                  value[IDX(localRows - 1, cols - 1, w + 1)] +
+                  value[IDX(localRows - 1, cols - 2, w)] +
+                  value[IDX(localRows - 2, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(localRows - 1, j, w)] = ((value[IDX(localRows - 1, j, w - 1)] +
+                                             2 * value[IDX(localRows - 1, j, w)] +
+                                             value[IDX(localRows - 1, j, w + 1)] +
+                                             value[IDX(localRows - 1, j + 1, w)] +
+                                             value[IDX(localRows - 1, j - 1, w)] +
+                                             value[IDX(localRows - 2, j, w)]) /
+                                            7);
             }
           }
 
-          value[M - 1][J - 1][W - 1] =
-              ((value[M - 1][J - 1][W - 2] + 2 * value[M - 1][J - 1][W - 1] +
-                value[M - 1][J - 2][W - 1] + value[M - 2][J - 1][W - 1] +
-                v_next) /
+          value[IDX(localRows - 1, cols - 1, depth - 1)] =
+              ((value[IDX(localRows - 1, cols - 1, depth - 2)] +
+                2 * value[IDX(localRows - 1, cols - 1, depth - 1)] +
+                value[IDX(localRows - 1, cols - 2, depth - 1)] +
+                value[IDX(localRows - 2, cols - 1, depth - 1)] + valueNext) /
                6);
         }
 
-        if ((M > 1) && (J <= 1) && (W > 1)) {
+        if ((localRows > 1) && (cols <= 1) && (depth > 1)) {
 
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[1][0][0] +
-                             value[0][0][1] + v_previous) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] +
+                             value[IDX(0, 0, 1)] + valuePrev) /
                             5);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[1][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(1, 0, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[1][0][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(1, 0, depth - 1)]) /
+               4);
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][0][1] + value[i - 1][0][0]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 0, 1)] + value[IDX(i - 1, 0, 0)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[i][0][w] = ((value[i][0][w - 1] + 2 * value[i][0][w] +
-                                 value[i][0][w + 1] + value[i + 1][0][w] +
-                                 value[i - 1][0][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] = ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                                 value[IDX(i, 0, w + 1)] + value[IDX(i + 1, 0, w)] +
+                                 value[IDX(i - 1, 0, w)]) /
                                 6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
                  5);
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][0][1]) /
-                                4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 0, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][0][w] =
-                ((value[M - 1][0][w - 1] + 2 * value[M - 1][0][w] +
-                  value[M - 1][0][w + 1] + value[M - 2][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 2, 0, w)]) /
                  5);
           }
-          value[M - 1][0][W - 1] =
-              ((value[M - 1][0][W - 2] + 2 * value[M - 1][0][W - 1] +
-                value[M - 2][0][W - 1] + v_next) /
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)] + valueNext) /
                5);
         }
 
-        if ((M <= 1) && (J > 1) && (W > 1)) {
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][1][0] +
-                             value[0][0][1] + v_previous) /
+        if ((localRows <= 1) && (cols > 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] +
+                             value[IDX(0, 0, 1)] + valuePrev) /
                             5);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[0][1][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(0, 1, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[0][1][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)]) /
+               4);
 
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((2 * value[0][j][0] + value[0][j - 1][0] +
-                               value[0][j + 1][0] + value[0][j][1]) /
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((2 * value[IDX(0, j, 0)] + value[IDX(0, j - 1, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(0, j, 1)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[0][j][w] = ((value[0][j][w - 1] + 2 * value[0][j][w] +
-                                 value[0][j][w + 1] + value[0][j + 1][w] +
-                                 value[0][j - 1][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)]) /
                                 6);
             }
-            value[0][j][W - 1] =
-                ((value[0][j][W - 2] + 2 * value[0][j][W - 1] +
-                  value[0][j + 1][W - 1] + value[0][j - 1][W - 1]) /
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j, depth - 2)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(0, j - 1, depth - 1)]) /
                  5);
           }
 
-          // J-1
-          value[0][J - 1][0] = ((2 * value[0][J - 1][0] + value[0][J - 2][0] +
-                                 value[0][J - 1][1]) /
-                                4);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((2 * value[IDX(0, cols - 1, 0)] + value[IDX(0, cols - 2, 0)] +
+                value[IDX(0, cols - 1, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][J - 1][w] =
-                ((value[0][J - 1][w - 1] + 2 * value[0][J - 1][w] +
-                  value[0][J - 1][w + 1] + value[0][J - 2][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)]) /
                  5);
           }
-          value[0][J - 1][W - 1] =
-              ((value[0][J - 1][W - 2] + 2 * value[0][J - 1][W - 1] +
-                value[0][J - 2][W - 1] + v_next) /
+          value[IDX(0, cols - 1, depth - 1)] =
+              ((value[IDX(0, cols - 1, depth - 2)] +
+                2 * value[IDX(0, cols - 1, depth - 1)] +
+                value[IDX(0, cols - 2, depth - 1)] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J > 1) && (W <= 1)) {
+        if ((localRows > 1) && (cols > 1) && (depth <= 1)) {
 
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[1][0][0] +
-                             value[0][1][0] + v_previous) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] +
+                             value[IDX(0, 1, 0)] + valuePrev) /
                             5);
 
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0] + value[1][j][0]) /
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(1, j, 0)]) /
                               5);
           }
-          value[0][J - 1][0] = ((value[0][J - 2][0] + 2 * value[0][J - 1][0] +
-                                 value[1][J - 1][0]) /
-                                4);
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(1, cols - 1, 0)]) /
+               4);
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][1][0] + value[i - 1][0][0]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 1, 0)] + value[IDX(i - 1, 0, 0)]) /
                               5);
 
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][0] = ((value[i][j - 1][0] + 2 * value[i][j][0] +
-                                 value[i][j + 1][0] + value[i + 1][j][0] +
-                                 value[i - 1][j][0]) /
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] = ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                                 value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] +
+                                 value[IDX(i - 1, j, 0)]) /
                                 6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
                  5);
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][1][0]) /
-                                4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 1, 0)]) /
+               4);
 
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][0][j] =
-                ((value[M - 1][j - 1][0] + 2 * value[M - 1][j][0] +
-                  value[M - 1][j + 1][0] + value[M - 2][j][0]) /
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, 0, j)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)]) /
                  5);
           }
-          value[M - 1][J - 1][0] =
-              ((value[M - 1][J - 2][0] + 2 * value[M - 1][J - 1][0] +
-                value[M - 2][J - 1][0] + v_next) /
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 2, cols - 1, 0)] + valueNext) /
                5);
         }
 
-        if ((M > 1) && (J <= 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[1][0][0] + v_previous) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
-            value[i][0][0] = ((value[i - 1][0][0] + 2 * value[i][0][0] +
-                               value[i + 1][0][0]) /
+        if ((localRows > 1) && (cols <= 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] + valuePrev) / 4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
+            value[IDX(i, 0, 0)] = ((value[IDX(i - 1, 0, 0)] + 2 * value[IDX(i, 0, 0)] +
+                               value[IDX(i + 1, 0, 0)]) /
                               4);
-          // M-1
-          value[M - 1][0][0] =
-              ((value[M - 2][0][0] + 2 * value[M - 1][0][0] + v_next) / 4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((value[IDX(localRows - 2, 0, 0)] + 2 * value[IDX(localRows - 1, 0, 0)] +
+                valueNext) /
+               4);
         }
 
-        if ((M <= 1) && (J > 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[0][1][0] + v_previous) / 4);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0]) /
+        if ((localRows <= 1) && (cols > 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] + valuePrev) / 4);
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)]) /
                               4);
-          // J-1
-          value[0][J - 1][0] =
-              ((value[0][J - 2][0] + 2 * value[0][J - 1][0] + v_next) / 4);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] + valueNext) /
+               4);
         }
 
-        if ((M <= 1) && (J <= 1) && (W > 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[0][0][1] + v_previous) / 4);
-          // between 0 and W-1
-          for (w = 1; w < W - 1; w++)
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1]) /
+        if ((localRows <= 1) && (cols <= 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 0, 1)] + valuePrev) / 4);
+          // interior depth (w in 1..depth-2)
+          for (w = 1; w < depth - 1; w++)
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)]) /
                               4);
-          // W-1
-          value[0][0][W - 1] =
-              ((value[0][0][W - 2] + 2 * value[0][0][W - 1] + v_next) / 4);
+          // back face (w=depth-1)
+          value[IDX(0, 0, depth - 1)] = ((value[IDX(0, 0, depth - 2)] +
+                                     2 * value[IDX(0, 0, depth - 1)] + valueNext) /
+                                    4);
         }
 
-        if ((M <= 1) && (J <= 1) && (W <= 1))
-          value[0][0][0] = ((2 * value[0][0][0] + v_previous + v_next) / 4);
+        if ((localRows <= 1) && (cols <= 1) && (depth <= 1))
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + valuePrev + valueNext) / 4);
       }
 
       if (rank == (size - 1)) {
-        MPI_Send(&value[0][0][0], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
-        MPI_Recv(&v_previous, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
+        MPI_Send(&value[IDX(0, 0, 0)], 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD);
+        MPI_Recv(&valuePrev, 1, MPI_FLOAT, (rank - 1), 1, MPI_COMM_WORLD,
                  &status);
 
-        if ((M > 1) && (J > 1) && (W > 1)) {
+        if ((localRows > 1) && (cols > 1) && (depth > 1)) {
 
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][1][0] +
-                             value[1][0][0] + value[0][0][1] + v_previous) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] +
+                             value[IDX(1, 0, 0)] + value[IDX(0, 0, 1)] + valuePrev) /
                             6);
-          // i == 0; j==0;
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] =
-                ((value[0][0][w - 1] + 2 * value[0][0][w] + value[0][0][w + 1] +
-                  value[0][1][w] + value[1][0][w]) /
+          // edge along depth at i=0, j=0 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] =
+                ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] + value[IDX(0, 0, w + 1)] +
+                  value[IDX(0, 1, w)] + value[IDX(1, 0, w)]) /
                  6);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[0][1][W - 1] + value[1][0][W - 1]) /
-                                5);
-          // i == 0; w == 0;
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] =
-                ((value[0][j - 1][0] + 2 * value[0][j][0] + value[0][j + 1][0] +
-                  value[1][j][0] + value[0][j][1]) /
-                 6);
-          }
-          value[0][J - 1][0] = ((value[0][J - 2][0] + 2 * value[0][J - 1][0] +
-                                 value[0][J - 1][1] + value[1][J - 1][0]) /
-                                5);
-          // i == 0; w == W-1;
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][W - 1] =
-                ((value[0][j - 1][W - 1] + 2 * value[0][j][W - 1] +
-                  value[0][j + 1][W - 1] + value[1][j][W - 1] +
-                  value[0][j][W - 1]) /
-                 6);
-          }
-          value[0][J - 1][W - 1] =
-              ((value[0][J - 1][W - 2] + 2 * value[0][J - 1][W - 1] +
-                value[0][J - 2][W - 1] + value[1][J - 1][W - 1]) /
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)] + value[IDX(1, 0, depth - 1)]) /
                5);
-          // i == 0; j == J-1;
-          for (w = 1; w < W - 1; w++) {
-            value[0][J - 1][w] =
-                ((value[0][J - 1][w - 1] + 2 * value[0][J - 1][w] +
-                  value[0][J - 1][w + 1] + value[0][J - 2][w] +
-                  value[1][J - 1][w]) /
+          // edge along columns at i=0, w=0 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] =
+                ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] + value[IDX(0, j + 1, 0)] +
+                  value[IDX(1, j, 0)] + value[IDX(0, j, 1)]) /
                  6);
           }
-          // general case
-          for (j = 1; j < J - 1; j++) {
-            for (w = 1; w < W - 1; w++) {
-              value[0][j][w] = ((value[0][j][w - 1] + 2 * value[0][j][w] +
-                                 value[0][j][w + 1] + value[0][j + 1][w] +
-                                 value[0][j - 1][w] + value[1][j][w]) /
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(0, cols - 1, 1)] + value[IDX(1, cols - 1, 0)]) /
+               5);
+          // edge along columns at i=0, w=depth-1 (j varies)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j - 1, depth - 1)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(1, j, depth - 1)] +
+                  value[IDX(0, j, depth - 1)]) /
+                 6);
+          }
+          value[IDX(0, cols - 1, depth - 1)] =
+              ((value[IDX(0, cols - 1, depth - 2)] +
+                2 * value[IDX(0, cols - 1, depth - 1)] +
+                value[IDX(0, cols - 2, depth - 1)] + value[IDX(1, cols - 1, depth - 1)]) /
+               5);
+          // edge along depth at i=0, j=cols-1 (w varies)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)] +
+                  value[IDX(1, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)] + value[IDX(1, j, w)]) /
                                 7);
             }
           }
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i][1][0] +
-                               value[i + 1][0][0] + value[i][0][1]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i, 1, 0)] +
+                               value[IDX(i + 1, 0, 0)] + value[IDX(i, 0, 1)]) /
                               5);
-            // j==0;
-            for (w = 1; w < W - 1; w++) {
-              value[i][0][w] =
-                  ((value[i][0][w - 1] + 2 * value[i][0][w] +
-                    value[i][0][w + 1] + value[i][1][w] + value[i + 1][0][w]) /
+            // left face (j=0)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] =
+                  ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                    value[IDX(i, 0, w + 1)] + value[IDX(i, 1, w)] + value[IDX(i + 1, 0, w)]) /
                    6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i][1][W - 1] + value[i + 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i, 1, depth - 1)] + value[IDX(i + 1, 0, depth - 1)]) /
                  5);
-            // w == 0;
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][0] =
-                  ((value[i][j - 1][0] + 2 * value[i][j][0] +
-                    value[i][j + 1][0] + value[i + 1][j][0] + value[i][j][1]) /
+            // front face (w=0)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] =
+                  ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                    value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] + value[IDX(i, j, 1)]) /
                    6);
             }
-            value[i][J - 1][0] =
-                ((value[i][J - 2][0] + 2 * value[i][J - 1][0] +
-                  value[i][J - 1][1] + value[i + 1][J - 1][0]) /
+            value[IDX(i, cols - 1, 0)] =
+                ((value[IDX(i, cols - 2, 0)] + 2 * value[IDX(i, cols - 1, 0)] +
+                  value[IDX(i, cols - 1, 1)] + value[IDX(i + 1, cols - 1, 0)]) /
                  5);
-            // w == W-1;
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][W - 1] =
-                  ((value[i][j - 1][W - 1] + 2 * value[i][j][W - 1] +
-                    value[i][j + 1][W - 1] + value[i + 1][j][W - 1] +
-                    value[i][j][W - 1]) /
+            // back face (w=depth-1)
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, depth - 1)] =
+                  ((value[IDX(i, j - 1, depth - 1)] + 2 * value[IDX(i, j, depth - 1)] +
+                    value[IDX(i, j + 1, depth - 1)] + value[IDX(i + 1, j, depth - 1)] +
+                    value[IDX(i, j, depth - 1)]) /
                    6);
             }
-            value[i][J - 1][W - 1] =
-                ((value[i][J - 1][W - 2] + 2 * value[i][J - 1][W - 1] +
-                  value[i][J - 2][W - 1] + value[i + 1][J - 1][W - 1]) /
+            value[IDX(i, cols - 1, depth - 1)] =
+                ((value[IDX(i, cols - 1, depth - 2)] +
+                  2 * value[IDX(i, cols - 1, depth - 1)] +
+                  value[IDX(i, cols - 2, depth - 1)] +
+                  value[IDX(i + 1, cols - 1, depth - 1)]) /
                  5);
-            // j == J-1;
-            for (w = 1; w < W - 1; w++) {
-              value[i][J - 1][w] =
-                  ((value[i][J - 1][w - 1] + 2 * value[i][J - 1][w] +
-                    value[i][J - 1][w + 1] + value[i][J - 2][w] +
-                    value[i + 1][J - 1][w]) /
+            // right face (j=cols-1)
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, cols - 1, w)] =
+                  ((value[IDX(i, cols - 1, w - 1)] + 2 * value[IDX(i, cols - 1, w)] +
+                    value[IDX(i, cols - 1, w + 1)] + value[IDX(i, cols - 2, w)] +
+                    value[IDX(i + 1, cols - 1, w)]) /
                    6);
             }
-            // general case
-            for (j = 1; j < J - 1; j++) {
-              for (w = 1; w < W - 1; w++) {
-                value[i][j][w] = ((value[i][j][w - 1] + 2 * value[i][j][w] +
-                                   value[i][j][w + 1] + value[i][j + 1][w] +
-                                   value[i][j - 1][w] + value[i - 1][j][w] +
-                                   value[i + 1][j][w]) /
+            // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+            // in 1..depth-2)
+            for (j = 1; j < cols - 1; j++) {
+              for (w = 1; w < depth - 1; w++) {
+                value[IDX(i, j, w)] = ((value[IDX(i, j, w - 1)] + 2 * value[IDX(i, j, w)] +
+                                   value[IDX(i, j, w + 1)] + value[IDX(i, j + 1, w)] +
+                                   value[IDX(i, j - 1, w)] + value[IDX(i - 1, j, w)] +
+                                   value[IDX(i + 1, j, w)]) /
                                   8);
               }
             }
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 1][1][0] +
-                                 value[M - 2][0][0] + value[M - 1][0][1]) /
-                                5);
-          // i == M-1; j==0;
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][0][w] =
-                ((value[M - 1][0][w - 1] + 2 * value[M - 1][0][w] +
-                  value[M - 1][0][w + 1] + value[M - 1][1][w] +
-                  value[M - 2][0][w]) /
-                 6);
-          }
-          value[M - 1][0][W - 1] =
-              ((value[M - 1][0][W - 2] + 2 * value[M - 1][0][W - 1] +
-                value[M - 1][1][W - 1] + value[M - 2][0][W - 1]) /
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 1, 1, 0)] +
+                value[IDX(localRows - 2, 0, 0)] + value[IDX(localRows - 1, 0, 1)]) /
                5);
-          // i == M-1; w == 0;
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][j][0] =
-                ((value[M - 1][j - 1][0] + 2 * value[M - 1][j][0] +
-                  value[M - 1][j + 1][0] + value[M - 2][j][0] +
-                  value[M - 1][j][1]) /
+          // bottom-left edge (i=localRows-1, j=0)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 1, 1, w)] +
+                  value[IDX(localRows - 2, 0, w)]) /
                  6);
           }
-          value[M - 1][J - 1][0] =
-              ((value[M - 1][J - 2][0] + 2 * value[M - 1][J - 1][0] +
-                value[M - 1][J - 1][1] + value[M - 2][J - 1][0]) /
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 1, 1, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)]) /
                5);
-          // i == M-1; w == W-1;
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][j][W - 1] =
-                ((value[M - 1][j - 1][W - 1] + 2 * value[M - 1][j][W - 1] +
-                  value[M - 1][j + 1][W - 1] + value[M - 2][j][W - 1] +
-                  value[M - 1][j][W - 1]) /
+          // bottom-front edge (i=localRows-1, w=0)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, 0)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)] +
+                  value[IDX(localRows - 1, j, 1)]) /
                  6);
           }
-          // i == M-1; j == J-1;
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][J - 1][w] =
-                ((value[M - 1][J - 1][w - 1] + 2 * value[M - 1][J - 1][w] +
-                  value[M - 1][J - 1][w + 1] + value[M - 1][J - 2][w] +
-                  value[M - 2][J - 1][w]) /
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 1, cols - 1, 1)] +
+                value[IDX(localRows - 2, cols - 1, 0)]) /
+               5);
+          // bottom-back edge (i=localRows-1, w=depth-1)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, j, depth - 1)] =
+                ((value[IDX(localRows - 1, j - 1, depth - 1)] +
+                  2 * value[IDX(localRows - 1, j, depth - 1)] +
+                  value[IDX(localRows - 1, j + 1, depth - 1)] +
+                  value[IDX(localRows - 2, j, depth - 1)] +
+                  value[IDX(localRows - 1, j, depth - 1)]) /
                  6);
           }
-          // general case
-          for (j = 1; j < J - 1; j++) {
-            for (w = 1; w < W - 1; w++) {
-              value[M - 1][j][w] =
-                  ((value[M - 1][j][w - 1] + 2 * value[M - 1][j][w] +
-                    value[M - 1][j][w + 1] + value[M - 1][j + 1][w] +
-                    value[M - 1][j - 1][w] + value[M - 2][j][w]) /
-                   7);
+          // bottom-right edge (i=localRows-1, j=cols-1)
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, cols - 1, w)] =
+                ((value[IDX(localRows - 1, cols - 1, w - 1)] +
+                  2 * value[IDX(localRows - 1, cols - 1, w)] +
+                  value[IDX(localRows - 1, cols - 1, w + 1)] +
+                  value[IDX(localRows - 1, cols - 2, w)] +
+                  value[IDX(localRows - 2, cols - 1, w)]) /
+                 6);
+          }
+          // interior volume (i in 1..localRows-2, j in 1..cols-2, w
+          // in 1..depth-2)
+          for (j = 1; j < cols - 1; j++) {
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(localRows - 1, j, w)] = ((value[IDX(localRows - 1, j, w - 1)] +
+                                             2 * value[IDX(localRows - 1, j, w)] +
+                                             value[IDX(localRows - 1, j, w + 1)] +
+                                             value[IDX(localRows - 1, j + 1, w)] +
+                                             value[IDX(localRows - 1, j - 1, w)] +
+                                             value[IDX(localRows - 2, j, w)]) /
+                                            7);
             }
           }
 
-          value[M - 1][J - 1][W - 1] =
-              ((value[M - 1][J - 1][W - 2] + 2 * value[M - 1][J - 1][W - 1] +
-                value[M - 1][J - 2][W - 1] + value[M - 2][J - 1][W - 1]) /
+          value[IDX(localRows - 1, cols - 1, depth - 1)] =
+              ((value[IDX(localRows - 1, cols - 1, depth - 2)] +
+                2 * value[IDX(localRows - 1, cols - 1, depth - 1)] +
+                value[IDX(localRows - 1, cols - 2, depth - 1)] +
+                value[IDX(localRows - 2, cols - 1, depth - 1)]) /
                5);
         }
 
-        if ((M > 1) && (J <= 1) && (W > 1)) {
+        if ((localRows > 1) && (cols <= 1) && (depth > 1)) {
 
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[1][0][0] +
-                             value[0][0][1] + v_previous) /
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] +
+                             value[IDX(0, 0, 1)] + valuePrev) /
                             5);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[1][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(1, 0, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[1][0][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(1, 0, depth - 1)]) /
+               4);
 
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][0][1] + value[i - 1][0][0]) /
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 0, 1)] + value[IDX(i - 1, 0, 0)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[i][0][w] = ((value[i][0][w - 1] + 2 * value[i][0][w] +
-                                 value[i][0][w + 1] + value[i + 1][0][w] +
-                                 value[i - 1][0][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(i, 0, w)] = ((value[IDX(i, 0, w - 1)] + 2 * value[IDX(i, 0, w)] +
+                                 value[IDX(i, 0, w + 1)] + value[IDX(i + 1, 0, w)] +
+                                 value[IDX(i - 1, 0, w)]) /
                                 6);
             }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
                  5);
           }
 
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][0][1]) /
-                                4);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 0, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[M - 1][0][w] =
-                ((value[M - 1][0][w - 1] + 2 * value[M - 1][0][w] +
-                  value[M - 1][0][w + 1] + value[M - 2][0][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(localRows - 1, 0, w)] =
+                ((value[IDX(localRows - 1, 0, w - 1)] +
+                  2 * value[IDX(localRows - 1, 0, w)] +
+                  value[IDX(localRows - 1, 0, w + 1)] + value[IDX(localRows - 2, 0, w)]) /
                  5);
           }
-          value[M - 1][0][W - 1] =
-              ((value[M - 1][0][W - 2] + 2 * value[M - 1][0][W - 1] +
-                value[M - 2][0][W - 1]) /
+          value[IDX(localRows - 1, 0, depth - 1)] =
+              ((value[IDX(localRows - 1, 0, depth - 2)] +
+                2 * value[IDX(localRows - 1, 0, depth - 1)] +
+                value[IDX(localRows - 2, 0, depth - 1)]) /
                4);
         }
 
-        if ((M <= 1) && (J > 1) && (W > 1)) {
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[0][1][0] +
-                             value[0][0][1] + v_previous) /
+        if ((localRows <= 1) && (cols > 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] +
+                             value[IDX(0, 0, 1)] + valuePrev) /
                             5);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1] + value[0][1][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)] + value[IDX(0, 1, w)]) /
                               5);
           }
-          value[0][0][W - 1] = ((value[0][0][W - 2] + 2 * value[0][0][W - 1] +
-                                 value[0][1][W - 1]) /
-                                4);
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)] +
+                value[IDX(0, 1, depth - 1)]) /
+               4);
 
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((2 * value[0][j][0] + value[0][j - 1][0] +
-                               value[0][j + 1][0] + value[0][j][1]) /
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((2 * value[IDX(0, j, 0)] + value[IDX(0, j - 1, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(0, j, 1)]) /
                               5);
 
-            for (w = 1; w < W - 1; w++) {
-              value[0][j][w] = ((value[0][j][w - 1] + 2 * value[0][j][w] +
-                                 value[0][j][w + 1] + value[0][j + 1][w] +
-                                 value[0][j - 1][w]) /
+            for (w = 1; w < depth - 1; w++) {
+              value[IDX(0, j, w)] = ((value[IDX(0, j, w - 1)] + 2 * value[IDX(0, j, w)] +
+                                 value[IDX(0, j, w + 1)] + value[IDX(0, j + 1, w)] +
+                                 value[IDX(0, j - 1, w)]) /
                                 6);
             }
-            value[0][j][W - 1] =
-                ((value[0][j][W - 2] + 2 * value[0][j][W - 1] +
-                  value[0][j + 1][W - 1] + value[0][j - 1][W - 1]) /
+            value[IDX(0, j, depth - 1)] =
+                ((value[IDX(0, j, depth - 2)] + 2 * value[IDX(0, j, depth - 1)] +
+                  value[IDX(0, j + 1, depth - 1)] + value[IDX(0, j - 1, depth - 1)]) /
                  5);
           }
 
-          // J-1
-          value[0][J - 1][0] = ((2 * value[0][J - 1][0] + value[0][J - 2][0] +
-                                 value[0][J - 1][1]) /
-                                4);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((2 * value[IDX(0, cols - 1, 0)] + value[IDX(0, cols - 2, 0)] +
+                value[IDX(0, cols - 1, 1)]) /
+               4);
 
-          for (w = 1; w < W - 1; w++) {
-            value[0][J - 1][w] =
-                ((value[0][J - 1][w - 1] + 2 * value[0][J - 1][w] +
-                  value[0][J - 1][w + 1] + value[0][J - 2][w]) /
+          for (w = 1; w < depth - 1; w++) {
+            value[IDX(0, cols - 1, w)] =
+                ((value[IDX(0, cols - 1, w - 1)] + 2 * value[IDX(0, cols - 1, w)] +
+                  value[IDX(0, cols - 1, w + 1)] + value[IDX(0, cols - 2, w)]) /
                  5);
           }
-          value[0][J - 1][W - 1] =
-              ((value[0][J - 1][W - 2] + 2 * value[0][J - 1][W - 1] +
-                value[0][J - 2][W - 1]) /
+          value[IDX(0, cols - 1, depth - 1)] = ((value[IDX(0, cols - 1, depth - 2)] +
+                                            2 * value[IDX(0, cols - 1, depth - 1)] +
+                                            value[IDX(0, cols - 2, depth - 1)]) /
+                                           4);
+        }
+
+        if ((localRows > 1) && (cols > 1) && (depth <= 1)) {
+
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] +
+                             value[IDX(0, 1, 0)] + valuePrev) /
+                            5);
+
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)] + value[IDX(1, j, 0)]) /
+                              5);
+          }
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)] +
+                value[IDX(1, cols - 1, 0)]) /
+               4);
+
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++) {
+            value[IDX(i, 0, 0)] = ((2 * value[IDX(i, 0, 0)] + value[IDX(i + 1, 0, 0)] +
+                               value[IDX(i, 1, 0)] + value[IDX(i - 1, 0, 0)]) /
+                              5);
+
+            for (j = 1; j < cols - 1; j++) {
+              value[IDX(i, j, 0)] = ((value[IDX(i, j - 1, 0)] + 2 * value[IDX(i, j, 0)] +
+                                 value[IDX(i, j + 1, 0)] + value[IDX(i + 1, j, 0)] +
+                                 value[IDX(i - 1, j, 0)]) /
+                                6);
+            }
+            value[IDX(i, 0, depth - 1)] =
+                ((value[IDX(i, 0, depth - 2)] + 2 * value[IDX(i, 0, depth - 1)] +
+                  value[IDX(i + 1, 0, depth - 1)] + value[IDX(i - 1, 0, depth - 1)]) /
+                 5);
+          }
+
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((2 * value[IDX(localRows - 1, 0, 0)] + value[IDX(localRows - 2, 0, 0)] +
+                value[IDX(localRows - 1, 1, 0)]) /
+               4);
+
+          for (j = 1; j < cols - 1; j++) {
+            value[IDX(localRows - 1, 0, j)] =
+                ((value[IDX(localRows - 1, j - 1, 0)] +
+                  2 * value[IDX(localRows - 1, j, 0)] +
+                  value[IDX(localRows - 1, j + 1, 0)] + value[IDX(localRows - 2, j, 0)]) /
+                 5);
+          }
+          value[IDX(localRows - 1, cols - 1, 0)] =
+              ((value[IDX(localRows - 1, cols - 2, 0)] +
+                2 * value[IDX(localRows - 1, cols - 1, 0)] +
+                value[IDX(localRows - 2, cols - 1, 0)]) /
                4);
         }
 
-        if ((M > 1) && (J > 1) && (W <= 1)) {
-
-          // 0
-          value[0][0][0] = ((2 * value[0][0][0] + value[1][0][0] +
-                             value[0][1][0] + v_previous) /
-                            5);
-
-          for (j = 1; j < J - 1; j++) {
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0] + value[1][j][0]) /
-                              5);
-          }
-          value[0][J - 1][0] = ((value[0][J - 2][0] + 2 * value[0][J - 1][0] +
-                                 value[1][J - 1][0]) /
-                                4);
-
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++) {
-            value[i][0][0] = ((2 * value[i][0][0] + value[i + 1][0][0] +
-                               value[i][1][0] + value[i - 1][0][0]) /
-                              5);
-
-            for (j = 1; j < J - 1; j++) {
-              value[i][j][0] = ((value[i][j - 1][0] + 2 * value[i][j][0] +
-                                 value[i][j + 1][0] + value[i + 1][j][0] +
-                                 value[i - 1][j][0]) /
-                                6);
-            }
-            value[i][0][W - 1] =
-                ((value[i][0][W - 2] + 2 * value[i][0][W - 1] +
-                  value[i + 1][0][W - 1] + value[i - 1][0][W - 1]) /
-                 5);
-          }
-
-          // M-1
-          value[M - 1][0][0] = ((2 * value[M - 1][0][0] + value[M - 2][0][0] +
-                                 value[M - 1][1][0]) /
-                                4);
-
-          for (j = 1; j < J - 1; j++) {
-            value[M - 1][0][j] =
-                ((value[M - 1][j - 1][0] + 2 * value[M - 1][j][0] +
-                  value[M - 1][j + 1][0] + value[M - 2][j][0]) /
-                 5);
-          }
-          value[M - 1][J - 1][0] =
-              ((value[M - 1][J - 2][0] + 2 * value[M - 1][J - 1][0] +
-                value[M - 2][J - 1][0]) /
-               4);
-        }
-
-        if ((M > 1) && (J <= 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[1][0][0] + v_previous) / 4);
-          // between 0 and M-1
-          for (i = 1; i < M - 1; i++)
-            value[i][0][0] = ((value[i - 1][0][0] + 2 * value[i][0][0] +
-                               value[i + 1][0][0]) /
+        if ((localRows > 1) && (cols <= 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(1, 0, 0)] + valuePrev) / 4);
+          // interior rows (i in 1..localRows-2)
+          for (i = 1; i < localRows - 1; i++)
+            value[IDX(i, 0, 0)] = ((value[IDX(i - 1, 0, 0)] + 2 * value[IDX(i, 0, 0)] +
+                               value[IDX(i + 1, 0, 0)]) /
                               4);
-          // M-1
-          value[M - 1][0][0] =
-              ((value[M - 2][0][0] + 2 * value[M - 1][0][0]) / 3);
+          // bottom face (i=localRows-1)
+          value[IDX(localRows - 1, 0, 0)] =
+              ((value[IDX(localRows - 2, 0, 0)] + 2 * value[IDX(localRows - 1, 0, 0)]) /
+               3);
         }
 
-        if ((M <= 1) && (J > 1) && (W <= 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[0][1][0] + v_previous) / 4);
-          // between 0 and J-1
-          for (j = 1; j < J - 1; j++)
-            value[0][j][0] = ((value[0][j - 1][0] + 2 * value[0][j][0] +
-                               value[0][j + 1][0]) /
+        if ((localRows <= 1) && (cols > 1) && (depth <= 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 1, 0)] + valuePrev) / 4);
+          // interior columns (j in 1..cols-2)
+          for (j = 1; j < cols - 1; j++)
+            value[IDX(0, j, 0)] = ((value[IDX(0, j - 1, 0)] + 2 * value[IDX(0, j, 0)] +
+                               value[IDX(0, j + 1, 0)]) /
                               4);
-          // J-1
-          value[0][J - 1][0] =
-              ((value[0][J - 2][0] + 2 * value[0][J - 1][0]) / 3);
+          // right face (j=cols-1)
+          value[IDX(0, cols - 1, 0)] =
+              ((value[IDX(0, cols - 2, 0)] + 2 * value[IDX(0, cols - 1, 0)]) / 3);
         }
 
-        if ((M <= 1) && (J <= 1) && (W > 1)) {
-          // 0
-          value[0][0][0] =
-              ((2 * value[0][0][0] + value[0][0][1] + v_previous) / 4);
-          // between 0 and W-1
-          for (w = 1; w < W - 1; w++)
-            value[0][0][w] = ((value[0][0][w - 1] + 2 * value[0][0][w] +
-                               value[0][0][w + 1]) /
+        if ((localRows <= 1) && (cols <= 1) && (depth > 1)) {
+          // corner at i=0, j=0, w=0 (top/front/left)
+          value[IDX(0, 0, 0)] =
+              ((2 * value[IDX(0, 0, 0)] + value[IDX(0, 0, 1)] + valuePrev) / 4);
+          // interior depth (w in 1..depth-2)
+          for (w = 1; w < depth - 1; w++)
+            value[IDX(0, 0, w)] = ((value[IDX(0, 0, w - 1)] + 2 * value[IDX(0, 0, w)] +
+                               value[IDX(0, 0, w + 1)]) /
                               4);
-          // W-1
-          value[0][0][W - 1] =
-              ((value[0][0][W - 2] + 2 * value[0][0][W - 1]) / 3);
+          // back face (w=depth-1)
+          value[IDX(0, 0, depth - 1)] =
+              ((value[IDX(0, 0, depth - 2)] + 2 * value[IDX(0, 0, depth - 1)]) / 3);
         }
 
-        if ((M <= 1) && (J <= 1) && (W <= 1))
-          value[0][0][0] = ((2 * value[0][0][0] + v_previous) / 3);
+        if ((localRows <= 1) && (cols <= 1) && (depth <= 1))
+          value[IDX(0, 0, 0)] = ((2 * value[IDX(0, 0, 0)] + valuePrev) / 3);
       }
     }
 
-    for (i = 0; i < M; i++) {
-      for (j = 0; j < J; j++) {
-        for (w = 0; w < W; w++) {
-          printf(
-              "Result for rank %d at position i:%d j:%d w:%d was %f\n",
-              rank, i, j, w, value[i][j][w]);
+    for (i = 0; i < localRows; i++) {
+      for (j = 0; j < cols; j++) {
+        for (w = 0; w < depth; w++) {
+          printf("Result for rank %d at position i:%d j:%d w:%d was %f\n", rank,
+                 i, j, w, value[IDX(i, j, w)]);
         }
       }
     }
